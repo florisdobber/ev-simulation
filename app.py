@@ -7,25 +7,12 @@ import random
 import plotly.express as px
 import plotly.graph_objects as go
 import datetime
-from dataclasses import dataclass
 
-# Type aliases for clarity
-TimeType = datetime.time
-DateTimeType = datetime.datetime
-
-# Constants
-SIMULATION_START: DateTimeType = datetime.datetime.now().replace(hour=6, minute=0, second=0, microsecond=0)
-SIMULATION_END: DateTimeType = SIMULATION_START + datetime.timedelta(days=1)
-INTERVALS: pd.DatetimeIndex = pd.date_range(SIMULATION_START, periods=49, freq='30min')
-
-# Visualization constants
-RED: str = '#ff3333'
-LIGHT_BLUE: str = '#22d3ee'
-
-# Charging constants
-CHARGING_POWER: float = 7.0  # kW
-MIN_PLUG_OUT_HOUR: int = 6       # 6 AM
-
+SIMULATION_START = datetime.datetime.now().replace(hour=6, minute=0, second=0, microsecond=0)
+SIMULATION_END = SIMULATION_START + datetime.timedelta(days=1)
+INTERVALS = pd.date_range(SIMULATION_START, periods=49, freq='30min')
+RED = '#ff3333'
+LIGHT_BLUE = '#22d3ee'
 
 # Default configurations for each archetype
 ARCHETYPE_CONFIGS = {
@@ -91,177 +78,81 @@ ARCHETYPE_CONFIGS = {
     }
 }
 
-@dataclass
-class GlobalVariance:
-    """Global configuration for behavioral variance parameters.
-    
-    Attributes:
-        plug_in_time_std: Standard deviation for plug-in time in hours
-        plug_out_time_std: Standard deviation for plug-out time in hours
-        soc_std_factor: Standard deviation for SoC as a fraction of base SoC
-    """
-    plug_in_time_std: float = 0.0
-    plug_out_time_std: float = 0.0
-    soc_std_factor: float = 0.00
-
-
 class EVUser:
-    """
-    Represents an electric vehicle user with specific charging behaviors.
-    
-    Attributes:
-        soc_history (List[float]): History of state of charge values
-        battery_kwh (float): Battery capacity in kWh
-        plug_in_frequency (float): Probability of plugging in on any given day
-        target_soc (float): Target state of charge
-        plug_in_soc (float): State of charge when plugging in
-        plug_in_time (TimeType): Time when vehicle is typically plugged in
-        plug_out_time (TimeType): Time when vehicle is typically unplugged
-    """
-
-    variance_config: GlobalVariance = GlobalVariance()
-    
     def __init__(self, config: dict):
-        """
-        Initialize an EV user with given configuration.
-        
-        Args:
-            config (dict): Configuration dictionary containing charging behavior parameters
-        """
-        self.soc_history: List[float] = []
+        self.soc_history = []
         self.battery_kwh = config['battery_kwh']
         self.plug_in_frequency = config['plug_in_frequency']
         self.target_soc = config['target_soc']
 
-        self.plug_in_soc = self._calculate_plug_in_soc(
-            config['plug_in_soc'],
-            self.variance_config.soc_std_factor
-        )
-        
-        self.plug_in_time = self._calculate_plug_time(
-            config['plug_in_hour'],
-            config['plug_in_minute'],
-            is_plug_in=True,
-            std_dev=self.variance_config.plug_in_time_std
-        )
-        
-        self.plug_out_time = self._calculate_plug_time(
-            config['plug_out_hour'],
-            config['plug_out_minute'],
-            is_plug_in=False,
-            std_dev=self.variance_config.plug_out_time_std
-        )
-
-    def _calculate_plug_in_soc(self, base_soc: float, std_dev_factor: float = 0.05) -> float:
-        """
-        Calculate plug-in SoC with random variation.
-        
-        Args:
-            base_soc (float): Base state of charge value
-            std_dev_factor (float): Standard deviation as a fraction of base_soc
-            
-        Returns:
-            float: Calculated plug-in SoC with random variation
-        """
-        std_dev = std_dev_factor * base_soc
+        base_plug_in_soc = config['plug_in_soc']
+        # Standard deviation of 5% of the base value
+        std_dev = 0.05 * base_plug_in_soc
+        # Generate random variation with normal distribution
         variation = random.gauss(0, std_dev)
-        return max(0.05, min(0.95, base_soc + variation))
+        # Apply variation and ensure result stays within valid bounds (0.05 to 0.95)
+        self.plug_in_soc = max(0.05, min(0.95, base_plug_in_soc + variation))
 
-    def _calculate_plug_time(self, base_hour: int, base_minute: int, is_plug_in: bool) -> TimeType:
-        """
-        Calculate plug time with random variation.
-        
-        Args:
-            base_hour (int): Base hour for plug time
-            base_minute (int): Base minute for plug time
-            is_plug_in (bool): True if calculating plug-in time, False for plug-out time
-            
-        Returns:
-            TimeType: Calculated plug time with random variation
-        """
-        variation = random.gauss(0, 0.5)  # Standard deviation of 0.5 hours
-        if is_plug_in:
-            adjusted_hour = max(0, min(23, round(base_hour + variation)))
-        else:
-            adjusted_hour = max(MIN_PLUG_OUT_HOUR, min(23, round(base_hour + variation)))
-        return datetime.time(adjusted_hour, base_minute)
+        # Add normally distributed variance to plug in time
+        base_plug_in_hour = config['plug_in_hour']
+        # Standard deviation of 0.5 hours means ~68% within ±30min, ~95% within ±1hour
+        plug_in_variation = random.gauss(0, 0.5)
+        # Round to nearest hour and ensure within bounds
+        adjusted_plug_in_hour = max(0, min(23, round(base_plug_in_hour + plug_in_variation)))
+        self.plug_in_time = datetime.time(adjusted_plug_in_hour, config['plug_in_minute'])
 
-    def _calculate_charging_periods(self, charge_needed: float) -> List[float]:
-        """
-        Calculate charging periods based on needed charge.
-        
-        Args:
-            charge_needed (float): Amount of charge needed in kWh
-            
-        Returns:
-            List[float]: List of charging amounts for each period
-        """
-        num_periods = min(math.ceil(charge_needed / CHARGING_POWER), 12)
-        charging_window = 6 * 2  # 6 hours, 30-minute intervals
-        
-        charging_periods = [CHARGING_POWER] * num_periods + [0] * (charging_window - num_periods)
-        random.shuffle(charging_periods)
-        return charging_periods
 
-    def simulate_day(self) -> None:
+        base_plug_out_hour = config['plug_out_hour']
+        plug_out_variation = random.gauss(0, 0.5)
+        # Round to nearest hour and ensure within bounds (min 6 AM)
+        adjusted_plug_out_hour = max(6, min(23, round(base_plug_out_hour + plug_out_variation)))
+        self.plug_out_time = datetime.time(adjusted_plug_out_hour, config['plug_out_minute'])
+
+
+    def simulate_day(self):
         """
         Simulate a day of battery SoC, starting at 6 AM and ending at 6 AM the next day.
-        Updates the soc_history attribute with simulated values.
         """
-        # Simulate until plug-out time
-        num_periods = (self.plug_out_time.hour - 6) * 2
+        # Add periods until plug-out time
+        num_periods = (self.plug_out_time.hour - 6) * 2  # 6 AM is the simulation start time
         self.soc_history.extend(self.target_soc for _ in range(num_periods + 1))
 
-        # Simulate discharge until plug-in time
-        self._simulate_discharge()
+        # Add periods until plug-in time
+        num_periods = (self.plug_in_time.hour - self.plug_out_time.hour) * 2
+        step_size = (self.plug_in_soc - self.target_soc) / int(num_periods)
+
+        for _ in range(num_periods):
+            self.soc_history.append(round(self.soc_history[-1] + step_size, 4))
         
-        # Simulate until charging window
+        # Add periods until 11:30 PM
         num_periods = int((23.5 - self.plug_in_time.hour) * 2)
         self.soc_history.extend(self.soc_history[-1] for _ in range(num_periods))
 
-        # Simulate charging or non-charging behavior
-        self._simulate_charging()
-
-    def _simulate_discharge(self) -> None:
-        """Simulate discharge period between plug-out and plug-in times."""
-        num_periods = (self.plug_in_time.hour - self.plug_out_time.hour) * 2
-        step_size = (self.plug_in_soc - self.target_soc) / int(num_periods)
-        
-        for _ in range(num_periods):
-            self.soc_history.append(round(self.soc_history[-1] + step_size, 4))
-
-    def _simulate_charging(self) -> None:
-        """Simulate charging behavior during the charging window."""
-        if random.random() > self.plug_in_frequency:
-            # Not charging tonight
+        if random.random() > self.plug_in_frequency:  # Randomly decide not to plug in
             self.soc_history.extend([self.soc_history[-1]] * 6 * 2)
-            return
+        else:
+            # Calculate how much charge is needed
+            charge_needed = self.battery_kwh * (self.target_soc - self.plug_in_soc)
+            num_periods = min(math.ceil(charge_needed / 3.5), 12) # Limit to 42 kWh per night, or 12 periods
 
-        charge_needed = self.battery_kwh * (self.target_soc - self.plug_in_soc)
-        charging_periods = self._calculate_charging_periods(charge_needed)
-        
-        charge_list = (np.cumsum(charging_periods) / self.battery_kwh) + self.soc_history[-1]
-        charge_list = np.minimum(charge_list, self.target_soc)
-        
-        self.soc_history.extend(np.round(charge_list, 4))
-        self.soc_history.append(self.soc_history[-1])  # Add final period until 6 AM
+            # Charging window is from 11:30 PM to 5:30 AM (6 hours)
+            charging_window = 6 * 2
 
-    @classmethod
-    def set_global_variance(cls, variance: GlobalVariance) -> None:
-        """Set global variance configuration for all EV users."""
-        cls.variance_config = variance
+            # Create charging period list
+            charging_periods = [3.5] * num_periods + [0] * (charging_window - num_periods)
+            random.shuffle(charging_periods)
+
+            # Create list of running total of charge
+            charge_list = (np.cumsum(charging_periods) / self.battery_kwh) + self.soc_history[-1]
+            charge_list = np.minimum(charge_list, self.target_soc) # Limit to target SoC
+
+            self.soc_history.extend(np.round(charge_list, 4))
+
+        # Add periods until 6 AM
+        self.soc_history.append(self.soc_history[-1])
 
 def config_section(archetype: str, config: dict) -> dict:
-    """
-    Create configuration section for an archetype with input validation.
-    
-    Args:
-        archetype (str): Name of the archetype
-        config (dict): Current configuration for the archetype
-        
-    Returns:
-        dict: Updated configuration based on user input
-    """
+    """Create configuration section for an archetype"""
     new_config = config.copy()
     
     col1, col2 = st.columns(2)
@@ -323,13 +214,7 @@ def config_section(archetype: str, config: dict) -> dict:
         
     return new_config
 
-def archetype_overview(user: EVUser) -> None:
-    """
-    Display key metrics for an EV user archetype.
-    
-    Args:
-        user (EVUser): EVUser instance to display metrics for
-    """
+def archetype_overview(user: EVUser):
     col1, col2, col3 = st.columns(3)
 
     with col1:
@@ -345,16 +230,6 @@ def archetype_overview(user: EVUser) -> None:
     
 
 def plot_agent(user: EVUser, archetype: str) -> go.Figure:
-    """
-    Create a plot showing the state of charge for a single EV agent.
-    
-    Args:
-        user (EVUser): EVUser instance to plot
-        archetype (str): Name of the archetype being plotted
-        
-    Returns:
-        go.Figure: Plotly figure object containing the plot
-    """
     fig = go.Figure()
 
     fig.add_shape(
@@ -410,22 +285,10 @@ def plot_agent(user: EVUser, archetype: str) -> go.Figure:
     return fig
 
 def plot_population(population: List[EVUser]) -> go.Figure:
-    """
-    Create a plot showing aggregate metrics for a population of EV users.
-    
-    Args:
-        population (List[EVUser]): List of EVUser instances to analyze
-        
-    Returns:
-        go.Figure: Plotly figure object containing the population plot
-    """
     population_size = len(population)
 
-    plugged_in = [
-        sum(1 for ev in population if ev.plug_in_time <= t.time() or t.time() <= ev.plug_out_time) 
-        for t 
-        in INTERVALS
-    ]
+    plugged_in = [sum(1 for ev in population if ev.plug_in_time <= t.time() or t.time() <= ev.plug_out_time) 
+                  for t in INTERVALS]
     proportion_plugged_in = [x / population_size for x in plugged_in]
     soc_df = pd.DataFrame([ev.soc_history for ev in population], index=range(len(population)))
 
@@ -484,38 +347,7 @@ def main():
     if 'configs' not in st.session_state:
         st.session_state.configs = ARCHETYPE_CONFIGS.copy()
 
-    if 'variance' not in st.session_state:
-        st.session_state.variance = GlobalVariance()
-
     st.sidebar.header('Simulation Parameters')
-
-    with st.sidebar.expander("Global Variance Controls"):
-        GlobalVariance(
-            plug_in_time_std=st.slider(
-                'Plug-in Time Variance (hours)',
-                min_value=0.0,
-                max_value=2.0,
-                value=st.session_state.variance.plug_in_time_std,
-                step=0.1,
-                help='Standard deviation of plug-in time variation in hours'
-            ),
-            plug_out_time_std=st.slider(
-                'Plug-out Time Variance (hours)',
-                min_value=0.0,
-                max_value=2.0,
-                value=st.session_state.variance.plug_out_time_std,
-                step=0.1,
-                help='Standard deviation of plug-out time variation in hours'
-            ),
-            soc_std_factor=st.slider(
-                'SoC Variance Factor',
-                min_value=0.0,
-                max_value=0.2,
-                value=st.session_state.variance.soc_std_factor,
-                step=0.01,
-                help='Standard deviation of SoC variation as a fraction of base SoC'
-            )
-        )
 
     with st.sidebar.expander('Archetype Configurations'):
         archetype = st.selectbox('Select archetype to configure', list(ARCHETYPE_CONFIGS.keys()))
@@ -595,6 +427,11 @@ def main():
     - Little to no validation is performed on the input values.
     - Validation of results was done manually, additional graphs and metrics could be added for further validation.
     - Charging is limited to 42 kWh (6 hours * 7 kW) per night.
+    """)
+
+    st.markdown("""
+    ### To do
+    - Finish notes and assumptions.
     """)
 
 if __name__ == '__main__':
